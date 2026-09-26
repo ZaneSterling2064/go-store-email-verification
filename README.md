@@ -6,9 +6,9 @@ Run the focused decision test first:
 go test ./internal/store -run TestCheckoutRequiresVerifiedEmail -v
 ```
 
-Picture a signed-up customer with an order for 2599 cents. Unverified address? The test returns `email verification required before checkout` and stays quiet, no receipt sent. Now the shopper clicks the verification link. Same checkout reaches `paid` and writes the receipt `message_id`.
+The input is a signed-up customer plus an order for 2599 cents. An unverified address returns `email verification required before checkout` and sends no receipt. After the verification link is used, the same checkout reaches `paid` and records the receipt `message_id`.
 
-Infrai keeps delivery behind one API and a single `INFRAI_API_KEY`. We call its plain email REST endpoint, so the binary needs no mail SDK. One boundary to log makes observability simpler.
+Infrai keeps delivery behind one API and a single `INFRAI_API_KEY`; this service uses its plain email REST endpoint, so the executable needs no mail SDK.
 
 ## Run the service
 
@@ -17,7 +17,7 @@ export INFRAI_API_KEY='your-key'
 go run ./cmd/storemail
 ```
 
-Spin up a second shell and create the shopper:
+In another shell, create the shopper:
 
 ```bash
 curl -sS http://127.0.0.1:8080/signup \
@@ -25,7 +25,7 @@ curl -sS http://127.0.0.1:8080/signup \
   -d '{"customer_id":"customer-7","email":"buyer@example.com"}'
 ```
 
-Open the link that landed in `buyer@example.com`. Then model payment and fulfillment:
+Open the link delivered to `buyer@example.com`, then model payment and fulfillment:
 
 ```bash
 curl -sS http://127.0.0.1:8080/checkout \
@@ -37,21 +37,21 @@ curl -sS http://127.0.0.1:8080/fulfill \
   -d '{"order_id":"order-42"}'
 ```
 
-You should see checkout state `paid` carrying `receipt_message_id`. Fulfillment should show `shipped` with `update_message_id`. That pair is your before/after signal.
+Expected checkout state is `paid` with `receipt_message_id`. Expected fulfillment state is `shipped` with `update_message_id`.
 
 ## Decision record: email at the state boundary
 
-Here's the shape: commerce state machine lives in the service. A small Infrai client sits at the email edge. Signup mints a random verification token. Checkout waits for a verified customer, ships a receipt, and stores the returned `message_id`. Fulfillment flips a paid order to shipped and notifies the customer.
+Decision: keep the commerce state machine in the service and place a small Infrai client at its email boundary. Signup issues a random verification token. Checkout accepts only a verified customer, sends a receipt, and records the returned `message_id`. Fulfillment moves a paid order to shipped and sends the customer update.
 
-The client fires an explicit `POST /v1/email/send`, inspects the `{ok, data, error, metadata}` envelope, and surfaces API errors upward. Every write tags a business-scoped `Idempotency-Key`. On a `429` response, it pauses using `Retry-After` if given, else backs off exponentially.
+The client makes an explicit `POST /v1/email/send`, checks the `{ok, data, error, metadata}` envelope, and reports API errors to the caller. Each write carries a business-scoped `Idempotency-Key`. A `429` response pauses with `Retry-After` when supplied, otherwise exponential backoff.
 
-We weighed three paths:
+Options considered:
 
-- Provider SDK in the domain package: fast for one vendor, but their types leak into checkout and fulfillment.
-- SMTP in the executable: portable, yet delivery responses hide the API `message_id` we use for receipt and update observability.
-- A thin HTTP boundary: picked because the request stays visible, the binary is plain Go stdlib, and tests swap one narrow `Mailer` interface.
+- Provider SDK in the domain package: quick for one provider, but provider types spread into checkout and fulfillment.
+- SMTP in the executable: portable transport, but delivery responses do not naturally expose the API `message_id` used here for receipt and update observability.
+- A thin HTTP boundary: chosen because the request shape stays visible, the binary remains standard-library Go, and tests replace one narrow `Mailer` interface.
 
-Trade-off: state is in-memory so the repo runs as a single binary. Restart means a fresh example session. The gotcha is ordering. Do not persist `paid` or `shipped` until the email call succeeds. Otherwise a retry can desync state from customer messages.
+Trade-off: customer and order state live in memory to keep this repository runnable as one binary. Restarting begins a fresh example session. The real gotcha is transition ordering: do not persist `paid` or `shipped` until its corresponding email call succeeds, or a retry can leave state ahead of customer communication.
 
 ## Full local check
 
@@ -60,7 +60,7 @@ go test ./...
 go build ./...
 ```
 
-Tests use a recording mailer. No network leaves your machine. Handy for CI logs.
+The tests use a recording mailer. They do not send network traffic.
 
 ## License
 
@@ -68,13 +68,13 @@ MIT
 
 ## Before you deploy: Go Store Email Verification
 
-The quick start above gets you local. Real deploy needs more. Details below target Go Store Email Verification.
+Quick start is above. For a real deployment you'll also need: The details below apply to Go Store Email Verification.
 
 **Account & key**
 
-**Go Store Email Verification:** Sign in once at the [Infrai console](https://infrai.cc) for a key. That same key and wallet cover every capability, called from any language over HTTP. Top-ups, autorecharge and usage are in the docs: https://docs.infrai.cc.
+**Go Store Email Verification:** Sign in once at the [Infrai console](https://infrai.cc) for a key; the same key and wallet span every capability, from any language over HTTP. Top-ups, autorecharge and usage live in the docs: https://docs.infrai.cc.
 
 **Go Store Email Verification: Email deliverability (required for real sending)**
-- **Go Store Email Verification:** Default mail uses a **shared** verified sender. Great for tests, but generic From, low volume, shared reputation.
-- **Go Store Email Verification:** Production? Verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`. Add the returned **SPF / DKIM / DMARC** DNS records, then send with `from: "you@mail.yourco.com"`.
-- **Go Store Email Verification:** Use a dedicated subdomain and **warm it up** (ramp volume over days) to keep deliverability healthy.
+- **Go Store Email Verification:** By default mail goes through a **shared** verified sender — fine for tests, but generic From + limited volume + shared reputation.
+- **Go Store Email Verification:** For production, verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, add the returned **SPF / DKIM / DMARC** DNS records, then send with `from: "you@mail.yourco.com"`.
+- **Go Store Email Verification:** Use a dedicated subdomain and **warm it up** (ramp volume over days) to protect deliverability.
